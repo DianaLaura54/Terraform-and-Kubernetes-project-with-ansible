@@ -1,0 +1,172 @@
+---
+# Ansible Playbook: Manage Kubernetes Applications
+# This playbook provides management tasks for deployed applications
+# Run with: ansible-playbook -i inventory.ini manage-applications.yml --tags "scale" (or other tags)
+
+- name: Manage Kubernetes Applications
+  hosts: localhost
+  connection: local
+  become: no
+
+  vars:
+    demo_app_namespace: "demo-app"
+    jenkins_namespace: "jenkins"
+    demo_app_replicas: 3
+
+  tasks:
+    # Status Check Tasks
+    - name: Get all namespaces
+      kubernetes.core.k8s_info:
+        kind: Namespace
+      register: namespaces
+      tags: [status, always]
+
+    - name: Get demo-app resources
+      kubernetes.core.k8s_info:
+        kind: "{{ item }}"
+        namespace: "{{ demo_app_namespace }}"
+      loop:
+        - Deployment
+        - Service
+        - Pod
+        - HorizontalPodAutoscaler
+      register: demo_resources
+      tags: [status]
+
+    - name: Get Jenkins resources
+      kubernetes.core.k8s_info:
+        kind: "{{ item }}"
+        namespace: "{{ jenkins_namespace }}"
+      loop:
+        - Deployment
+        - Service
+        - Pod
+        - PersistentVolumeClaim
+      register: jenkins_resources
+      tags: [status]
+
+    - name: Display resource status
+      debug:
+        msg:
+          - "=== Cluster Status ==="
+          - "Total Namespaces: {{ namespaces.resources | length }}"
+          - ""
+          - "Demo App:"
+          - "  Deployments: {{ demo_resources.results[0].resources | length }}"
+          - "  Services: {{ demo_resources.results[1].resources | length }}"
+          - "  Pods: {{ demo_resources.results[2].resources | length }}"
+          - ""
+          - "Jenkins:"
+          - "  Deployments: {{ jenkins_resources.results[0].resources | length }}"
+          - "  Services: {{ jenkins_resources.results[1].resources | length }}"
+          - "  Pods: {{ jenkins_resources.results[2].resources | length }}"
+      tags: [status]
+
+    # Scale Application
+    - name: Scale demo-app deployment
+      kubernetes.core.k8s_scale:
+        api_version: apps/v1
+        kind: Deployment
+        name: demo-app
+        namespace: "{{ demo_app_namespace }}"
+        replicas: "{{ demo_app_replicas }}"
+      tags: [scale, never]
+
+    - name: Wait for scaling to complete
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: demo-app
+        namespace: "{{ demo_app_namespace }}"
+      register: deployment_status
+      until: deployment_status.resources[0].status.readyReplicas == demo_app_replicas
+      retries: 10
+      delay: 5
+      tags: [scale, never]
+
+    - name: Display scaled pod count
+      debug:
+        msg: "Demo app scaled to {{ demo_app_replicas }} replicas"
+      tags: [scale, never]
+
+    # Restart Applications
+    - name: Restart demo-app deployment
+      command: kubectl rollout restart deployment/demo-app -n {{ demo_app_namespace }}
+      tags: [restart, never]
+
+    - name: Restart Jenkins deployment
+      command: kubectl rollout restart deployment/jenkins -n {{ jenkins_namespace }}
+      tags: [restart, never]
+
+    - name: Wait for rollout to complete
+      command: kubectl rollout status deployment/{{ item.deployment }} -n {{ item.namespace }}
+      loop:
+        - { deployment: "demo-app", namespace: "{{ demo_app_namespace }}" }
+        - { deployment: "jenkins", namespace: "{{ jenkins_namespace }}" }
+      tags: [restart, never]
+
+    # Get Logs
+    - name: Get demo-app logs
+      command: kubectl logs -l app=demo-app -n {{ demo_app_namespace }} --tail=50
+      register: demo_logs
+      tags: [logs, never]
+
+    - name: Display demo-app logs
+      debug:
+        var: demo_logs.stdout_lines
+      tags: [logs, never]
+
+    - name: Get Jenkins logs
+      command: kubectl logs deployment/jenkins -n {{ jenkins_namespace }} --tail=50
+      register: jenkins_logs
+      tags: [logs, never]
+
+    - name: Display Jenkins logs
+      debug:
+        var: jenkins_logs.stdout_lines
+      tags: [logs, never]
+
+    # Get Access Information
+    - name: Get Jenkins initial password
+      command: >
+        kubectl exec deployment/jenkins -n {{ jenkins_namespace }} --
+        cat /var/jenkins_home/secrets/initialAdminPassword
+      register: jenkins_password
+      ignore_errors: yes
+      tags: [info, never]
+
+    - name: Display access information
+      debug:
+        msg:
+          - "=== Access Information ==="
+          - ""
+          - "Demo Application:"
+          - "  Port Forward: kubectl port-forward svc/demo-app-service 8080:80 -n {{ demo_app_namespace }}"
+          - "  URL: http://localhost:8080"
+          - ""
+          - "Jenkins:"
+          - "  Port Forward: kubectl port-forward svc/jenkins 8081:8080 -n {{ jenkins_namespace }}"
+          - "  URL: http://localhost:8081/jenkins"
+          - "  Initial Password: {{ jenkins_password.stdout | default('Run with --tags info to retrieve') }}"
+      tags: [info, always]
+
+    # Health Checks
+    - name: Check pod health
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ item }}"
+      loop:
+        - "{{ demo_app_namespace }}"
+        - "{{ jenkins_namespace }}"
+      register: pod_health
+      tags: [health, never]
+
+    - name: Display pod health status
+      debug:
+        msg: >
+          Namespace: {{ item.item }}
+          Total Pods: {{ item.resources | length }}
+          Running: {{ item.resources | selectattr('status.phase', 'equalto', 'Running') | list | length }}
+          Pending: {{ item.resources | selectattr('status.phase', 'equalto', 'Pending') | list | length }}
+          Failed: {{ item.resources | selectattr('status.phase', 'equalto', 'Failed') | list | length }}
+      loop: "{{ pod_health.results }}"
+      tags: [health, never]

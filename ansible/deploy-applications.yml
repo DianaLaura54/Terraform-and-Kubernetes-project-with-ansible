@@ -1,0 +1,135 @@
+---
+# Ansible Playbook: Deploy Applications to Kubernetes
+# This playbook deploys the demo app and Jenkins using kubectl
+# Run with: ansible-playbook -i inventory.ini deploy-applications.yml
+
+- name: Deploy Applications to Kubernetes
+  hosts: localhost
+  connection: local
+  become: no
+
+  vars:
+    demo_app_namespace: "demo-app"
+    jenkins_namespace: "jenkins"
+    manifests_dir: "../kubernetes"
+
+  tasks:
+    - name: Verify Kubernetes connectivity
+      command: kubectl cluster-info
+      register: cluster_check
+      changed_when: false
+
+    - name: Display cluster info
+      debug:
+        msg: "Connected to Kubernetes cluster"
+      when: cluster_check.rc == 0
+
+    # Deploy Demo Application
+    - name: Create demo-app namespace
+      kubernetes.core.k8s:
+        name: "{{ demo_app_namespace }}"
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: Deploy demo application
+      kubernetes.core.k8s:
+        src: "{{ manifests_dir }}/deployment.yaml"
+        state: present
+      register: demo_deploy
+
+    - name: Wait for demo-app pods to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ demo_app_namespace }}"
+        label_selectors:
+          - app=demo-app
+        wait: yes
+        wait_timeout: 300
+        wait_condition:
+          type: Ready
+          status: "True"
+      register: demo_pods
+
+    - name: Display demo-app pod status
+      debug:
+        msg: "Demo app pods: {{ demo_pods.resources | length }} running"
+
+    # Deploy Jenkins
+    - name: Create jenkins namespace
+      kubernetes.core.k8s:
+        name: "{{ jenkins_namespace }}"
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: Deploy Jenkins
+      kubernetes.core.k8s:
+        src: "{{ manifests_dir }}/jenkins.yaml"
+        state: present
+      register: jenkins_deploy
+
+    - name: Wait for Jenkins pod to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ jenkins_namespace }}"
+        label_selectors:
+          - app=jenkins
+        wait: yes
+        wait_timeout: 600
+        wait_condition:
+          type: Ready
+          status: "True"
+      register: jenkins_pods
+      retries: 3
+      delay: 30
+
+    - name: Get Jenkins service info
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: "{{ jenkins_namespace }}"
+        name: jenkins
+      register: jenkins_service
+
+    # Verification
+    - name: Verify all deployments
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: "{{ item }}"
+      loop:
+        - "{{ demo_app_namespace }}"
+        - "{{ jenkins_namespace }}"
+      register: deployments
+
+    - name: Display deployment status
+      debug:
+        msg: >
+          Namespace: {{ item.item }}
+          Deployments: {{ item.resources | length }}
+          Status: {{ item.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | map(attribute='status') | first if item.resources else 'N/A' }}
+      loop: "{{ deployments.results }}"
+      when: item.resources | length > 0
+
+    # Get access information
+    - name: Get demo-app service
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: "{{ demo_app_namespace }}"
+        name: demo-app-service
+      register: demo_service
+
+    - name: Display access instructions
+      debug:
+        msg:
+          - "=== Deployment Complete ==="
+          - ""
+          - "Demo Application:"
+          - "  kubectl port-forward svc/demo-app-service 8080:80 -n {{ demo_app_namespace }}"
+          - "  Access: http://localhost:8080"
+          - ""
+          - "Jenkins:"
+          - "  kubectl port-forward svc/jenkins 8081:8080 -n {{ jenkins_namespace }}"
+          - "  Access: http://localhost:8081/jenkins"
+          - ""
+          - "Get Jenkins password:"
+          - "  kubectl exec -it deployment/jenkins -n {{ jenkins_namespace }} -- cat /var/jenkins_home/secrets/initialAdminPassword"

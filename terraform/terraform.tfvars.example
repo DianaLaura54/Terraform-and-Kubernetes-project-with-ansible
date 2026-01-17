@@ -1,0 +1,20 @@
+# Example Terraform Variables File
+# Copy this to terraform.tfvars and customize for your environment
+
+# Kubernetes Configuration
+kubeconfig_path = "~/.kube/config"
+kube_context    = "minikube"  # Change to your context (docker-desktop, kind-kind, etc.)
+
+# Application Configuration
+namespace    = "demo-app"
+environment  = "dev"
+app_image    = "nginx:latest"  # Replace with your application image
+app_replicas = 2
+max_replicas = 5
+
+# Service Configuration
+service_type = "ClusterIP"  # Options: ClusterIP, NodePort, LoadBalancer
+
+# Ingress Configuration
+enable_ingress = false
+app_hostname   = "demo-app.local"

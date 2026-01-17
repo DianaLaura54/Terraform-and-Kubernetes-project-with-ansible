@@ -1,0 +1,83 @@
+---
+# Master Ansible Playbook: Complete Infrastructure Setup
+# This playbook orchestrates the complete infrastructure deployment
+# Run with: ansible-playbook -i inventory.ini site.yml
+
+- name: Complete DevOps Infrastructure Deployment
+  hosts: localhost
+  connection: local
+
+  tasks:
+    - name: Display deployment banner
+      debug:
+        msg:
+          - "=========================================="
+          - "  DevOps Infrastructure Deployment"
+          - "  Kubernetes + Terraform + Jenkins"
+          - "=========================================="
+          - ""
+          - "This playbook will:"
+          - "  1. Install required tools"
+          - "  2. Setup Kubernetes cluster"
+          - "  3. Deploy applications"
+          - "  4. Verify deployment"
+          - ""
+
+# Step 1: Install Tools
+- name: Install DevOps Tools
+  import_playbook: install-tools.yml
+  tags: [install, tools]
+
+# Step 2: Setup Kubernetes
+- name: Setup Kubernetes Cluster
+  import_playbook: setup-kubernetes.yml
+  tags: [setup, kubernetes]
+
+# Step 3: Deploy Applications
+- name: Deploy Applications
+  import_playbook: deploy-applications.yml
+  tags: [deploy, applications]
+
+# Step 4: Final Status
+- name: Display Final Status
+  hosts: localhost
+  connection: local
+  become: no
+  tags: [always]
+
+  tasks:
+    - name: Get cluster status
+      command: kubectl get nodes
+      register: nodes
+      changed_when: false
+
+    - name: Get all pods
+      command: kubectl get pods -A
+      register: all_pods
+      changed_when: false
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "  Deployment Complete!"
+          - "=========================================="
+          - ""
+          - "Cluster Status:"
+          - "{{ nodes.stdout_lines }}"
+          - ""
+          - "Running Pods:"
+          - "{{ all_pods.stdout_lines | select('search', 'Running') | list | length }} pods running"
+          - ""
+          - "Next Steps:"
+          - "  1. Access demo app: kubectl port-forward svc/demo-app-service 8080:80 -n demo-app"
+          - "  2. Access Jenkins: kubectl port-forward svc/jenkins 8081:8080 -n jenkins"
+          - "  3. Get Jenkins password: kubectl exec -it deployment/jenkins -n jenkins -- cat /var/jenkins_home/secrets/initialAdminPassword"
+          - ""
+          - "Management Commands:"
+          - "  - Check status: ansible-playbook -i inventory.ini manage-applications.yml --tags status"
+          - "  - Scale app: ansible-playbook -i inventory.ini manage-applications.yml --tags scale -e demo_app_replicas=5"
+          - "  - View logs: ansible-playbook -i inventory.ini manage-applications.yml --tags logs"
+          - ""
+          - "Happy DevOps! 🚀"

@@ -1,0 +1,103 @@
+---
+# Ansible Playbook: Setup Kubernetes Cluster
+# This playbook installs and configures a Kubernetes cluster using Minikube
+# Run with: ansible-playbook -i inventory.ini setup-kubernetes.yml
+
+- name: Setup Kubernetes Cluster
+  hosts: localhost
+  connection: local
+  become: yes
+
+  vars:
+    minikube_version: "latest"
+    kubectl_version: "latest"
+    memory: "4096"
+    cpus: "2"
+
+  tasks:
+    - name: Check if Minikube is installed
+      command: which minikube
+      register: minikube_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Minikube (if not present)
+      block:
+        - name: Download Minikube binary
+          get_url:
+            url: "https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64"
+            dest: "/tmp/minikube"
+            mode: '0755'
+          when: ansible_os_family == "Debian" or ansible_os_family == "RedHat"
+
+        - name: Install Minikube
+          copy:
+            src: "/tmp/minikube"
+            dest: "/usr/local/bin/minikube"
+            mode: '0755'
+            remote_src: yes
+      when: minikube_check.rc != 0
+
+    - name: Check if kubectl is installed
+      command: which kubectl
+      register: kubectl_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install kubectl (if not present)
+      block:
+        - name: Download kubectl
+          get_url:
+            url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+            dest: "/tmp/kubectl"
+            mode: '0755'
+
+        - name: Install kubectl
+          copy:
+            src: "/tmp/kubectl"
+            dest: "/usr/local/bin/kubectl"
+            mode: '0755'
+            remote_src: yes
+      when: kubectl_check.rc != 0
+
+    - name: Start Minikube cluster
+      become: no
+      command: "minikube start --memory={{ memory }} --cpus={{ cpus }}"
+      register: minikube_start
+      changed_when: "'Done!' in minikube_start.stdout"
+
+    - name: Wait for Minikube to be ready
+      become: no
+      command: kubectl get nodes
+      register: kubectl_nodes
+      until: "'Ready' in kubectl_nodes.stdout"
+      retries: 10
+      delay: 10
+
+    - name: Display cluster info
+      become: no
+      command: kubectl cluster-info
+      register: cluster_info
+
+    - name: Show cluster information
+      debug:
+        var: cluster_info.stdout_lines
+
+    - name: Enable Minikube addons
+      become: no
+      command: "minikube addons enable {{ item }}"
+      loop:
+        - storage-provisioner
+        - default-storageclass
+        - metrics-server
+      register: addon_result
+      changed_when: "'enabled' in addon_result.stdout"
+
+    - name: Verify cluster is ready
+      become: no
+      command: kubectl get nodes -o wide
+      register: nodes_status
+
+    - name: Display node status
+      debug:
+        msg: "{{ nodes_status.stdout_lines }}"

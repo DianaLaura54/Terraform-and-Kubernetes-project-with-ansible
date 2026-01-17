@@ -1,0 +1,123 @@
+// Jenkinsfile.master-agent
+// This pipeline runs on Jenkins master (no Kubernetes agents)
+// Use this when Kubernetes agent pods have connection issues
+
+pipeline {
+    agent any  // Runs directly on Jenkins master pod
+
+    environment {
+        K8S_NAMESPACE = 'demo-app'
+    }
+
+    stages {
+        stage('Environment Info') {
+            steps {
+                echo '=== Build Information ==='
+                echo "Build Number: ${BUILD_NUMBER}"
+                echo "Jenkins URL: ${JENKINS_URL}"
+                echo "Workspace: ${WORKSPACE}"
+            }
+        }
+
+        stage('Check Kubernetes Connection') {
+            steps {
+                echo '=== Verifying Kubernetes Access ==='
+                sh '''
+                    kubectl version --client
+                    kubectl cluster-info
+                '''
+            }
+        }
+
+        stage('Check Cluster Resources') {
+            steps {
+                echo '=== Cluster Nodes ==='
+                sh 'kubectl get nodes'
+
+                echo ''
+                echo '=== All Namespaces ==='
+                sh 'kubectl get namespaces'
+            }
+        }
+
+        stage('Check Demo App') {
+            steps {
+                echo '=== Demo App Resources ==='
+                sh '''
+                    echo "Namespace: ${K8S_NAMESPACE}"
+                    echo ""
+
+                    echo "=== Deployments ==="
+                    kubectl get deployments -n ${K8S_NAMESPACE}
+                    echo ""
+
+                    echo "=== Pods ==="
+                    kubectl get pods -n ${K8S_NAMESPACE}
+                    echo ""
+
+                    echo "=== Services ==="
+                    kubectl get services -n ${K8S_NAMESPACE}
+                    echo ""
+
+                    echo "=== HPA ==="
+                    kubectl get hpa -n ${K8S_NAMESPACE} || echo "No HPA found"
+                '''
+            }
+        }
+
+        stage('Check Jenkins Deployment') {
+            steps {
+                echo '=== Jenkins Resources ==='
+                sh '''
+                    echo "=== Jenkins Deployment ==="
+                    kubectl get deployment jenkins -n jenkins
+                    echo ""
+
+                    echo "=== Jenkins Service ==="
+                    kubectl get service jenkins -n jenkins
+                    echo ""
+
+                    echo "=== Jenkins PVC ==="
+                    kubectl get pvc -n jenkins
+                '''
+            }
+        }
+
+        stage('Deployment Summary') {
+            steps {
+                echo '=== Deployment Summary ==='
+                sh '''
+                    echo "✓ Kubernetes cluster is accessible"
+                    echo "✓ Demo app is deployed in namespace: ${K8S_NAMESPACE}"
+                    echo "✓ Jenkins is running in namespace: jenkins"
+                    echo ""
+                    echo "To access demo app:"
+                    echo "  kubectl port-forward svc/demo-app-service 8080:80 -n ${K8S_NAMESPACE}"
+                    echo ""
+                    echo "To access Jenkins:"
+                    echo "  kubectl port-forward svc/jenkins 8081:8080 -n jenkins"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '======================================'
+            echo '✓ Pipeline Completed Successfully!'
+            echo '======================================'
+            echo 'All Kubernetes resources are healthy and accessible.'
+        }
+        failure {
+            echo '======================================'
+            echo '✗ Pipeline Failed'
+            echo '======================================'
+            echo 'Check the logs above for error details.'
+        }
+        always {
+            echo ''
+            echo 'Pipeline execution finished.'
+            echo "Build #${BUILD_NUMBER} completed at ${new Date()}"
+        }
+    }
+}

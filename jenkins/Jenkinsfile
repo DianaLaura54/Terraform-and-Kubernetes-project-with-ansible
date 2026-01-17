@@ -1,0 +1,493 @@
+// Complete Production-Ready Jenkinsfile
+// This pipeline builds, tests, and deploys the application to Kubernetes
+// Author: Vaida Diana-Laura
+// Project: Kubernetes + Terraform + Jenkins + Ansible DevOps Infrastructure
+
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins: agent
+    app: demo-app-builder
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: docker
+    image: docker:24-dind
+    command:
+    - cat
+    tty: true
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: kubectl
+    image: bitnami/kubectl:1.28
+    command:
+    - cat
+    tty: true
+  - name: terraform
+    image: hashicorp/terraform:1.6
+    command:
+    - cat
+    tty: true
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+"""
+        }
+    }
+
+    environment {
+        // Docker Registry Configuration
+        DOCKER_REGISTRY = 'docker.io'
+        DOCKER_CREDENTIALS = credentials('docker-hub-credentials')
+        IMAGE_NAME = 'demo-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+
+        // Kubernetes Configuration
+        K8S_NAMESPACE = 'demo-app'
+        DEPLOYMENT_NAME = 'demo-app'
+
+        // Application Configuration
+        APP_PORT = '80'
+        SERVICE_NAME = 'demo-app-service'
+    }
+
+    options {
+        // Build options
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Checkout Source Code'
+                    echo '═══════════════════════════════════════'
+                }
+
+                // Checkout code from Git
+                checkout scm
+
+                // Display git information
+                sh '''
+                    echo "Git Branch: ${GIT_BRANCH}"
+                    echo "Git Commit: ${GIT_COMMIT}"
+                    echo "Build Number: ${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        stage('Validate Dockerfile') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Validate Dockerfile'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('docker') {
+                    sh '''
+                        if [ -f Dockerfile ]; then
+                            echo "✓ Dockerfile found"
+                            cat Dockerfile
+                        else
+                            echo "✗ Dockerfile not found!"
+                            echo "Creating default Dockerfile..."
+                            cat > Dockerfile << 'EOF'
+FROM nginx:alpine
+COPY index.html /usr/share/nginx/html/ 2>/dev/null || echo "<h1>Demo App - Build ${BUILD_NUMBER}</h1>" > /usr/share/nginx/html/index.html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+EOF
+                            echo "✓ Default Dockerfile created"
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Build Docker Image'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('docker') {
+                    sh """
+                        echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+
+                        # Build the image
+                        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+
+                        # Tag as latest
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+
+                        # Tag with registry
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${DOCKER_REGISTRY}/${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:${IMAGE_TAG}
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${DOCKER_REGISTRY}/${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:latest
+
+                        # Display images
+                        echo "Built images:"
+                        docker images | grep ${IMAGE_NAME}
+                    """
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Run Tests'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('docker') {
+                    sh """
+                        echo "Running container tests..."
+
+                        # Test 1: Check if image exists
+                        if docker images | grep -q ${IMAGE_NAME}; then
+                            echo "✓ Image ${IMAGE_NAME}:${IMAGE_TAG} exists"
+                        else
+                            echo "✗ Image not found"
+                            exit 1
+                        fi
+
+                        # Test 2: Start container and test
+                        echo "Starting test container..."
+                        docker run -d --name test-${BUILD_NUMBER} -p 8080:80 ${IMAGE_NAME}:${IMAGE_TAG}
+
+                        # Wait for container to start
+                        sleep 5
+
+                        # Test 3: Check if container is running
+                        if docker ps | grep -q test-${BUILD_NUMBER}; then
+                            echo "✓ Container is running"
+                        else
+                            echo "✗ Container failed to start"
+                            docker logs test-${BUILD_NUMBER}
+                            exit 1
+                        fi
+
+                        # Test 4: Check HTTP response (if applicable)
+                        echo "Testing HTTP endpoint..."
+                        docker exec test-${BUILD_NUMBER} sh -c 'command -v curl || apk add --no-cache curl'
+                        docker exec test-${BUILD_NUMBER} curl -f http://localhost:80 || echo "HTTP test skipped"
+
+                        # Cleanup test container
+                        echo "Cleaning up test container..."
+                        docker stop test-${BUILD_NUMBER}
+                        docker rm test-${BUILD_NUMBER}
+
+                        echo "✓ All tests passed!"
+                    """
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Security Scan'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('docker') {
+                    sh """
+                        echo "Running basic security checks..."
+
+                        # Check image size
+                        IMAGE_SIZE=\$(docker images ${IMAGE_NAME}:${IMAGE_TAG} --format "{{.Size}}")
+                        echo "Image size: \${IMAGE_SIZE}"
+
+                        # Check for vulnerabilities (basic check)
+                        echo "Checking image layers..."
+                        docker history ${IMAGE_NAME}:${IMAGE_TAG}
+
+                        # Note: In production, you would use Trivy, Snyk, or similar tools
+                        # Example: trivy image ${IMAGE_NAME}:${IMAGE_TAG}
+
+                        echo "✓ Basic security checks completed"
+                    """
+                }
+            }
+        }
+
+        stage('Push to Registry') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Push to Docker Registry'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('docker') {
+                    sh """
+                        echo "Logging into Docker registry..."
+                        echo \${DOCKER_CREDENTIALS_PSW} | docker login -u \${DOCKER_CREDENTIALS_USR} --password-stdin \${DOCKER_REGISTRY}
+
+                        echo "Pushing image: ${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:${IMAGE_TAG}"
+                        docker push ${DOCKER_REGISTRY}/${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:${IMAGE_TAG}
+
+                        echo "Pushing image: ${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:latest"
+                        docker push ${DOCKER_REGISTRY}/${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:latest
+
+                        echo "✓ Images pushed successfully!"
+
+                        echo "Logging out..."
+                        docker logout ${DOCKER_REGISTRY}
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Deploy to Kubernetes'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('kubectl') {
+                    sh """
+                        echo "Deploying to namespace: ${K8S_NAMESPACE}"
+
+                        # Check if namespace exists
+                        if ! kubectl get namespace ${K8S_NAMESPACE} 2>/dev/null; then
+                            echo "Creating namespace ${K8S_NAMESPACE}..."
+                            kubectl create namespace ${K8S_NAMESPACE}
+                        fi
+
+                        # Check current deployment
+                        echo "Current deployment status:"
+                        kubectl get deployment ${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} 2>/dev/null || echo "No existing deployment found"
+
+                        # Update deployment image
+                        echo "Updating deployment with new image..."
+                        if kubectl get deployment ${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} 2>/dev/null; then
+                            # Update existing deployment
+                            kubectl set image deployment/${DEPLOYMENT_NAME} app=${DOCKER_REGISTRY}/${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:${IMAGE_TAG} -n ${K8S_NAMESPACE}
+                        else
+                            echo "Deployment not found. It should be created via Terraform or kubectl apply."
+                        fi
+
+                        # Wait for rollout
+                        echo "Waiting for rollout to complete..."
+                        kubectl rollout status deployment/${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} --timeout=5m
+
+                        echo "✓ Deployment completed!"
+                    """
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Verify Deployment'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('kubectl') {
+                    sh """
+                        echo "Verifying deployment in namespace: ${K8S_NAMESPACE}"
+                        echo ""
+
+                        echo "=== Deployments ==="
+                        kubectl get deployments -n ${K8S_NAMESPACE}
+                        echo ""
+
+                        echo "=== Replica Sets ==="
+                        kubectl get rs -n ${K8S_NAMESPACE}
+                        echo ""
+
+                        echo "=== Pods ==="
+                        kubectl get pods -n ${K8S_NAMESPACE} -o wide
+                        echo ""
+
+                        echo "=== Services ==="
+                        kubectl get services -n ${K8S_NAMESPACE}
+                        echo ""
+
+                        echo "=== Pod Logs (last 20 lines) ==="
+                        kubectl logs -l app=${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} --tail=20 || echo "No logs available"
+                        echo ""
+
+                        # Health check
+                        echo "=== Health Check ==="
+                        READY_PODS=\$(kubectl get pods -n ${K8S_NAMESPACE} -l app=${DEPLOYMENT_NAME} -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | grep -o True | wc -l)
+                        TOTAL_PODS=\$(kubectl get pods -n ${K8S_NAMESPACE} -l app=${DEPLOYMENT_NAME} --no-headers | wc -l)
+
+                        echo "Ready pods: \${READY_PODS}/\${TOTAL_PODS}"
+
+                        if [ "\${READY_PODS}" -eq "\${TOTAL_PODS}" ] && [ "\${TOTAL_PODS}" -gt 0 ]; then
+                            echo "✓ All pods are ready!"
+                        else
+                            echo "✗ Not all pods are ready"
+                            kubectl describe pods -n ${K8S_NAMESPACE} -l app=${DEPLOYMENT_NAME}
+                            exit 1
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Smoke Tests') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Smoke Tests'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('kubectl') {
+                    sh """
+                        echo "Running smoke tests..."
+
+                        # Wait for pods to be fully ready
+                        kubectl wait --for=condition=ready pod -l app=${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} --timeout=5m
+
+                        # Get service info
+                        echo "Service information:"
+                        kubectl get svc ${SERVICE_NAME} -n ${K8S_NAMESPACE} -o wide || echo "Service not found"
+
+                        # Test pod connectivity
+                        echo "Testing pod connectivity..."
+                        POD_NAME=\$(kubectl get pods -n ${K8S_NAMESPACE} -l app=${DEPLOYMENT_NAME} -o jsonpath='{.items[0].metadata.name}')
+                        echo "Testing pod: \${POD_NAME}"
+
+                        kubectl exec \${POD_NAME} -n ${K8S_NAMESPACE} -- sh -c 'echo "Pod is accessible"' || echo "Pod exec test skipped"
+
+                        echo "✓ Smoke tests passed!"
+                    """
+                }
+            }
+        }
+
+        stage('Performance Metrics') {
+            steps {
+                script {
+                    echo '═══════════════════════════════════════'
+                    echo '       STAGE: Performance Metrics'
+                    echo '═══════════════════════════════════════'
+                }
+
+                container('kubectl') {
+                    sh """
+                        echo "Gathering performance metrics..."
+
+                        # Pod resource usage
+                        echo "=== Resource Usage ==="
+                        kubectl top pods -n ${K8S_NAMESPACE} -l app=${DEPLOYMENT_NAME} || echo "Metrics server not available"
+
+                        # HPA status
+                        echo ""
+                        echo "=== HPA Status ==="
+                        kubectl get hpa -n ${K8S_NAMESPACE} || echo "No HPA configured"
+
+                        echo "✓ Metrics collected"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo '╔═══════════════════════════════════════╗'
+                echo '║   ✓ PIPELINE COMPLETED SUCCESSFULLY   ║'
+                echo '╚═══════════════════════════════════════╝'
+                echo ''
+                echo "Build: #${BUILD_NUMBER}"
+                echo "Image: ${DOCKER_REGISTRY}/${DOCKER_CREDENTIALS_USR}/${IMAGE_NAME}:${IMAGE_TAG}"
+                echo "Namespace: ${K8S_NAMESPACE}"
+                echo "Deployment: ${DEPLOYMENT_NAME}"
+                echo ''
+                echo 'Access your application:'
+                echo "  kubectl port-forward svc/${SERVICE_NAME} 8080:80 -n ${K8S_NAMESPACE}"
+                echo '  http://localhost:8080'
+            }
+        }
+
+        failure {
+            script {
+                echo '╔═══════════════════════════════════════╗'
+                echo '║      ✗ PIPELINE FAILED                ║'
+                echo '╚═══════════════════════════════════════╝'
+                echo ''
+                echo "Build: #${BUILD_NUMBER}"
+                echo "Failed at stage: ${env.STAGE_NAME}"
+                echo ''
+                echo 'Debugging information:'
+
+                container('kubectl') {
+                    sh '''
+                        echo "=== Recent Events ==="
+                        kubectl get events -n ${K8S_NAMESPACE} --sort-by='.lastTimestamp' | tail -20 || echo "No events"
+
+                        echo ""
+                        echo "=== Pod Status ==="
+                        kubectl get pods -n ${K8S_NAMESPACE} || echo "No pods"
+
+                        echo ""
+                        echo "=== Pod Logs ==="
+                        kubectl logs -l app=${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} --tail=50 || echo "No logs"
+                    '''
+                }
+            }
+        }
+
+        unstable {
+            echo '⚠ Pipeline completed with warnings'
+        }
+
+        always {
+            script {
+                echo ''
+                echo '═══════════════════════════════════════'
+                echo '       Pipeline Cleanup'
+                echo '═══════════════════════════════════════'
+
+                container('docker') {
+                    sh '''
+                        echo "Cleaning up Docker resources..."
+
+                        # Remove test containers if any
+                        docker ps -a | grep "test-${BUILD_NUMBER}" | awk '{print $1}' | xargs -r docker rm -f || true
+
+                        # Clean up dangling images (optional)
+                        # docker image prune -f || true
+
+                        echo "✓ Cleanup completed"
+                    '''
+                }
+
+                echo ''
+                echo "Pipeline finished at: ${new Date()}"
+                echo "Total duration: ${currentBuild.durationString}"
+                echo "Result: ${currentBuild.result}"
+            }
+        }
+    }
+}

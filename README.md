@@ -1,0 +1,1 @@
+This project demonstrates a complete DevOps infrastructure setup using modern cloud-native technologies. It showcases the deployment and management of containerized applications on Kubernetes, with infrastructure managed as code using Terraform, and automated CI/CD pipelines powered by Jenkins.

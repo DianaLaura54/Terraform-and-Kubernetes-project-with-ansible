@@ -1,0 +1,89 @@
+// Simple Jenkinsfile for Basic CI/CD
+// Builds and deploys application using kubectl
+
+pipeline {
+    agent any
+    
+    environment {
+        IMAGE_NAME = 'demo-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        K8S_NAMESPACE = 'demo-app'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                checkout scm
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+                    sh """
+                        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                echo 'Running tests...'
+                sh '''
+                    # Add your test commands here
+                    echo "Running unit tests..."
+                    # Example: docker run --rm ${IMAGE_NAME}:${IMAGE_TAG} npm test
+                '''
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            steps {
+                echo 'Deploying to Kubernetes...'
+                sh """
+                    # Update image in deployment
+                    kubectl set image deployment/demo-app app=${IMAGE_NAME}:${IMAGE_TAG} -n ${K8S_NAMESPACE}
+                    
+                    # Wait for rollout to complete
+                    kubectl rollout status deployment/demo-app -n ${K8S_NAMESPACE} --timeout=5m
+                    
+                    # Verify deployment
+                    kubectl get pods -n ${K8S_NAMESPACE}
+                """
+            }
+        }
+        
+        stage('Smoke Test') {
+            steps {
+                echo 'Running smoke tests...'
+                sh """
+                    # Wait for pods to be ready
+                    kubectl wait --for=condition=ready pod -l app=demo-app -n ${K8S_NAMESPACE} --timeout=5m
+                    
+                    # Get service endpoint
+                    kubectl get svc demo-app-service -n ${K8S_NAMESPACE}
+                    
+                    echo "Deployment successful!"
+                """
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo ' Deployment successful!'
+        }
+        failure {
+            echo ' Deployment failed!'
+            sh 'kubectl rollout undo deployment/demo-app -n ${K8S_NAMESPACE} || true'
+        }
+        cleanup {
+            echo 'Cleaning up workspace...'
+            cleanWs()
+        }
+    }
+}

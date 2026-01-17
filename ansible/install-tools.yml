@@ -1,0 +1,192 @@
+---
+# Ansible Playbook: Install DevOps Tools
+# This playbook installs kubectl, terraform, docker, and other required tools
+# Run with: ansible-playbook -i inventory.ini install-tools.yml
+
+- name: Install DevOps Tools
+  hosts: localhost
+  connection: local
+  become: yes
+
+  vars:
+    terraform_version: "1.6.0"
+    kubectl_version: "1.28.0"
+
+  tasks:
+    # System Updates
+    - name: Update apt cache (Debian/Ubuntu)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Update yum cache (RedHat/CentOS)
+      yum:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+    # Install Prerequisites
+    - name: Install required packages (Debian/Ubuntu)
+      apt:
+        name:
+          - curl
+          - wget
+          - gnupg
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - unzip
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages (RedHat/CentOS)
+      yum:
+        name:
+          - curl
+          - wget
+          - gnupg2
+          - unzip
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    # Install Docker
+    - name: Check if Docker is installed
+      command: which docker
+      register: docker_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Docker (Debian/Ubuntu)
+      block:
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            state: present
+
+        - name: Install Docker
+          apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+            state: present
+            update_cache: yes
+      when: ansible_os_family == "Debian" and docker_check.rc != 0
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+      when: docker_check.rc != 0
+
+    # Install kubectl
+    - name: Check if kubectl is installed
+      command: kubectl version --client
+      register: kubectl_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install kubectl
+      block:
+        - name: Download kubectl
+          get_url:
+            url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
+            dest: /tmp/kubectl
+            mode: '0755'
+
+        - name: Install kubectl
+          copy:
+            src: /tmp/kubectl
+            dest: /usr/local/bin/kubectl
+            mode: '0755'
+            remote_src: yes
+      when: kubectl_check.rc != 0
+
+    # Install Terraform
+    - name: Check if Terraform is installed
+      command: terraform version
+      register: terraform_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Terraform
+      block:
+        - name: Download Terraform
+          get_url:
+            url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"
+            dest: /tmp/terraform.zip
+
+        - name: Unzip Terraform
+          unarchive:
+            src: /tmp/terraform.zip
+            dest: /usr/local/bin/
+            remote_src: yes
+            mode: '0755'
+
+        - name: Remove Terraform zip
+          file:
+            path: /tmp/terraform.zip
+            state: absent
+      when: terraform_check.rc != 0
+
+    # Install Helm
+    - name: Check if Helm is installed
+      command: helm version
+      register: helm_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Helm
+      block:
+        - name: Download Helm install script
+          get_url:
+            url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+            dest: /tmp/get_helm.sh
+            mode: '0700'
+
+        - name: Run Helm install script
+          command: /tmp/get_helm.sh
+
+        - name: Remove Helm install script
+          file:
+            path: /tmp/get_helm.sh
+            state: absent
+      when: helm_check.rc != 0
+
+    # Verify Installations
+    - name: Verify Docker installation
+      command: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Verify kubectl installation
+      command: kubectl version --client
+      register: kubectl_version_output
+      changed_when: false
+
+    - name: Verify Terraform installation
+      command: terraform version
+      register: terraform_version_output
+      changed_when: false
+
+    - name: Verify Helm installation
+      command: helm version
+      register: helm_version_output
+      changed_when: false
+
+    - name: Display installed versions
+      debug:
+        msg:
+          - "=== Installed Tools ==="
+          - "Docker: {{ docker_version.stdout }}"
+          - "kubectl: {{ kubectl_version_output.stdout }}"
+          - "Terraform: {{ terraform_version_output.stdout }}"
+          - "Helm: {{ helm_version_output.stdout }}"
+          - ""
+          - "All tools installed successfully!"
